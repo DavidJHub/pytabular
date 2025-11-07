@@ -46,7 +46,8 @@ class OCRTableBuilder:
         n_cols: int,
         do_ocr: bool = True,
         lang: str = "eng",
-    ) -> pd.DataFrame:
+        return_box_texts: bool = False,
+    ) -> pd.DataFrame | Tuple[pd.DataFrame, Dict[int, str]]:
         table = [["" for _ in range(n_cols)] for _ in range(n_rows)]
         cell_blocks: Dict[Tuple[int, int], List[Tuple[float, str]]] = {}
         texts_cache: Dict[int, str] = {}
@@ -68,4 +69,6 @@ class OCRTableBuilder:
                 [t[1] for t in items_sorted if t[1].strip() != ""]
             ).strip()
         df = pd.DataFrame(table)
+        if return_box_texts:
+            return df, {i: texts_cache.get(i, "") for i in range(len(boxes))}
         return df
