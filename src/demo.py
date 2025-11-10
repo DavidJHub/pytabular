@@ -287,7 +287,7 @@ def _render_app() -> None:
         excel_buffer = io.BytesIO()
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
             result.table.to_excel(writer, index=False, sheet_name="Sheet1")
-        boxes_csv = _boxes_df_to_csv(result.boxes_df)
+        clusters_csv = _boxes_df_to_csv(result.boxes_df)
 
         c1, c2, c3 = st.columns(3)
         with c1:
@@ -306,9 +306,18 @@ def _render_app() -> None:
             )
         with c3:
             st.download_button(
-                "⬇️ Cajas detectadas (CSV)",
-                data=boxes_csv,
-                file_name=f"{uploaded.name}_boxes.csv",
+                "⬇️ Clusters detectados (CSV)",
+                data=clusters_csv,
+                file_name=f"{uploaded.name}_clusters.csv",
+                mime="text/csv",
+            )
+
+        with st.expander("📦 DataFrame de clusters"):
+            st.dataframe(result.boxes_df, use_container_width=True)
+            st.download_button(
+                "⬇️ Descargar CSV de clusters",
+                data=clusters_csv,
+                file_name=f"{uploaded.name}_clusters.csv",
                 mime="text/csv",
             )
 
@@ -335,7 +344,7 @@ def _render_app() -> None:
                 f"{stem}_table.xlsx",
                 excel_buffer.getvalue(),
             )
-            zf.writestr(f"{stem}_boxes.csv", boxes_csv)
+            zf.writestr(f"{stem}_clusters.csv", clusters_csv)
 
         zip_bytes = zip_buffer.getvalue()
 
@@ -345,9 +354,6 @@ def _render_app() -> None:
             file_name=f"{Path(uploaded.name).stem}_resultados.zip",
             mime="application/zip",
         )
-
-    with st.expander("Ver dataframe de cajas"):
-        st.dataframe(result.boxes_df, use_container_width=True)
 
 
 def run_app() -> None:

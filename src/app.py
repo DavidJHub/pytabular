@@ -33,7 +33,7 @@ import streamlit as st
 
 from image_utils import ImageUtils
 from pipeline import PipelineConfig, TableExtractionPipeline
-from ocr import TESSERACT_OK
+from ocr import EASYOCR_OK, TESSERACT_OK
 
 
 st.set_page_config(page_title="TABULAR:APP — OCR de Tablas (Python)", layout="wide")
@@ -65,7 +65,16 @@ with st.sidebar:
     manual_rows = st.number_input("Filas (manual)", min_value=1, max_value=200, value=6)
     manual_cols = st.number_input("Columnas (manual)", min_value=1, max_value=50, value=4)
 
-    do_ocr = st.checkbox("Hacer OCR para llenar celdas (Tesseract)", value=False)
+    default_ocr = TESSERACT_OK or EASYOCR_OK
+    if not default_ocr:
+        st.info(
+            "ℹ️ No se detectó un motor OCR. Instala Tesseract o `easyocr` y reinicia la app "
+            "para completar automáticamente las celdas."
+        )
+    do_ocr = st.checkbox(
+        "Hacer OCR para llenar celdas (usa Tesseract/EasyOCR si están disponibles)",
+        value=default_ocr,
+    )
     tess_lang = st.text_input("Idioma Tesseract (lang)", value="eng")
 
     st.markdown("**Depuración**")
@@ -195,21 +204,30 @@ if uploaded_files:
             )
 
         # Guardar CSV de bloques detectados
-        blocks_df = result.boxes_df.copy()
-        blocks_df.insert(0, "image_name", up.name)
-        blocks_csv = blocks_df.to_csv(index=False).encode("utf-8")
+        clusters_df = result.boxes_df.copy()
+        clusters_df.insert(0, "image_name", up.name)
+        clusters_csv = clusters_df.to_csv(index=False).encode("utf-8")
         with c3:
             st.download_button(
-                "⬇️ Bloques detectados (CSV)",
-                data=blocks_csv,
-                file_name=f"{os.path.splitext(up.name)[0]}_blocks.csv",
+                "⬇️ Clusters detectados (CSV)",
+                data=clusters_csv,
+                file_name=f"{os.path.splitext(up.name)[0]}_clusters.csv",
+                mime="text/csv",
+            )
+
+        with st.expander("📦 DataFrame de clusters"):
+            st.dataframe(clusters_df, use_container_width=True)
+            st.download_button(
+                "⬇️ Descargar CSV de clusters",
+                data=clusters_csv,
+                file_name=f"{os.path.splitext(up.name)[0]}_clusters.csv",
                 mime="text/csv",
             )
 
         # Agregar a ZIP
         zf.writestr(f"{os.path.splitext(up.name)[0]}_table.csv", csv_bytes)
         zf.writestr(f"{os.path.splitext(up.name)[0]}_table.xlsx", excel_bytes)
-        zf.writestr(f"{os.path.splitext(up.name)[0]}_blocks.csv", blocks_csv)
+        zf.writestr(f"{os.path.splitext(up.name)[0]}_clusters.csv", clusters_csv)
 
         all_results.append(
             {

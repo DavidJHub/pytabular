@@ -219,6 +219,42 @@ def merge_line_aligned_boxes(
     return merged_df
 
 
+def _cluster_axis(
+    coords: np.ndarray,
+    spans: np.ndarray,
+    base_tol: float,
+) -> List[List[int]]:
+    """Cluster 1D coordinates using adaptive gaps based on neighbour spans."""
+
+    if len(coords) == 0:
+        return []
+
+    order = np.argsort(coords)
+    clusters: List[List[int]] = []
+    current: List[int] = [int(order[0])]
+
+    def _adaptive_tol(i_prev: int, i_cur: int) -> float:
+        span_prev = spans[i_prev]
+        span_cur = spans[i_cur]
+        # Use the average span scaled by a factor so tall boxes tolerate
+        # proportionally larger gaps. ``0.6`` worked well in empirical tests.
+        span_tol = 0.6 * 0.5 * (span_prev + span_cur)
+        return max(base_tol, span_tol)
+
+    for idx in range(1, len(order)):
+        prev_idx = int(order[idx - 1])
+        cur_idx = int(order[idx])
+        gap = abs(float(coords[cur_idx]) - float(coords[prev_idx]))
+        if gap <= _adaptive_tol(prev_idx, cur_idx):
+            current.append(cur_idx)
+        else:
+            clusters.append(current)
+            current = [cur_idx]
+
+    clusters.append(current)
+    return clusters
+
+
 def group_rows_columns(
     boxes: List[Tuple[int, int, int, int]],
     row_tol: int = 12,
@@ -227,41 +263,37 @@ def group_rows_columns(
 ) -> Tuple[List[List[int]], List[List[int]]]:
     if not boxes:
         return [], []
-    xs1 = np.array([b[0] for b in boxes])
-    ys1 = np.array([b[1] for b in boxes])
-    xs2 = np.array([b[2] for b in boxes])
-    ys2 = np.array([b[3] for b in boxes])
-    cy = (ys1 + ys2) / 2.0
+
+    xs1 = np.array([b[0] for b in boxes], dtype=np.float32)
+    ys1 = np.array([b[1] for b in boxes], dtype=np.float32)
+    xs2 = np.array([b[2] for b in boxes], dtype=np.float32)
+    ys2 = np.array([b[3] for b in boxes], dtype=np.float32)
+
+    widths = np.maximum(1.0, xs2 - xs1)
+    heights = np.maximum(1.0, ys2 - ys1)
     cx = (xs1 + xs2) / 2.0
-    order_y = np.argsort(cy)
-    row_groups: List[List[int]] = []
-    current = [int(order_y[0])]
-    for k in range(1, len(order_y)):
-        i_prev = int(order_y[k - 1])
-        i_cur = int(order_y[k])
-        if abs(cy[i_cur] - cy[i_prev]) <= row_tol:
-            current.append(i_cur)
-        else:
-            row_groups.append(sorted(current, key=lambda idx: boxes[idx][0]))
-            current = [i_cur]
-    row_groups.append(sorted(current, key=lambda idx: boxes[idx][0]))
+    cy = (ys1 + ys2) / 2.0
+
+    adaptive_row_tol = max(float(row_tol), float(np.median(heights) * 0.55))
+    adaptive_col_tol = max(float(col_tol), float(np.median(widths) * 0.45))
+
+    row_clusters = _cluster_axis(cy, heights, adaptive_row_tol)
+    # Sort boxes within the row from left to right for consistent ordering.
+    row_groups: List[List[int]] = [
+        sorted(cluster, key=lambda idx: cx[idx]) for cluster in row_clusters
+    ]
+
     key_x = xs1 if prefer_left_alignment else cx
-    order_x = np.argsort(key_x)
-    col_groups: List[List[int]] = []
-    current = [int(order_x[0])]
-    for k in range(1, len(order_x)):
-        j_prev = int(order_x[k - 1])
-        j_cur = int(order_x[k])
-        if abs(key_x[j_cur] - key_x[j_prev]) <= col_tol:
-            current.append(j_cur)
-        else:
-            col_groups.append(
-                sorted(current, key=lambda idx: (boxes[idx][1] + boxes[idx][3]) / 2.0)
-            )
-            current = [j_cur]
-    col_groups.append(
-        sorted(current, key=lambda idx: (boxes[idx][1] + boxes[idx][3]) / 2.0)
-    )
+    col_clusters = _cluster_axis(key_x, widths, adaptive_col_tol)
+    # Sort boxes within the column from top to bottom.
+    col_groups: List[List[int]] = [
+        sorted(cluster, key=lambda idx: cy[idx]) for cluster in col_clusters
+    ]
+
+    # Ensure the groups themselves are ordered consistently.
+    row_groups.sort(key=lambda grp: float(np.mean([cy[i] for i in grp])))
+    col_groups.sort(key=lambda grp: float(np.mean([key_x[i] for i in grp])))
+
     return row_groups, col_groups
 
 
