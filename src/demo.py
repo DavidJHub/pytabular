@@ -25,6 +25,7 @@ for candidate in (APP_DIR, ROOT_DIR):
 
 from image_utils import ImageUtils
 from pipeline import PipelineConfig, TableExtractionPipeline
+from ocr import EASYOCR_OK, HF_OCR_OK, TESSERACT_OK
 
 
 BoxTuple = Tuple[int, int, int, int]
@@ -156,8 +157,29 @@ def _render_app() -> None:
         row_tol = st.slider("Tolerancia filas (agrupación)", 2, 50, 12, 1)
         col_tol = st.slider("Tolerancia columnas (agrupación)", 5, 80, 24, 1)
         prefer_left = st.checkbox("Priorizar alineación por borde izquierdo", value=True)
-        do_ocr = st.checkbox("Ejecutar OCR (Tesseract)", value=False)
-        tess_lang = st.text_input("Idioma OCR", value="eng")
+
+        default_ocr = TESSERACT_OK or EASYOCR_OK or HF_OCR_OK
+        available_engines = []
+        if TESSERACT_OK:
+            available_engines.append("Tesseract")
+        if EASYOCR_OK:
+            available_engines.append("EasyOCR")
+        if HF_OCR_OK:
+            available_engines.append("Hugging Face TrOCR")
+
+        if not default_ocr:
+            st.caption(
+                "⚠️ No se detectaron motores OCR. Instala Tesseract, `easyocr` o habilita el "
+                "modelo Hugging Face para obtener texto."
+            )
+        else:
+            st.caption("Motores disponibles: " + ", ".join(available_engines))
+
+        do_ocr = st.checkbox(
+            "Ejecutar OCR avanzado (Tesseract/EasyOCR/Hugging Face)",
+            value=default_ocr,
+        )
+        tess_lang = st.text_input("Idioma OCR (Tesseract/EasyOCR)", value="eng")
         auto_shape = st.checkbox("Estimar filas/columnas automáticamente", value=True)
         manual_rows = st.number_input("Filas manual", min_value=1, max_value=200, value=6)
         manual_cols = st.number_input("Columnas manual", min_value=1, max_value=50, value=4)

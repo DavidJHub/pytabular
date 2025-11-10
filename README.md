@@ -24,6 +24,11 @@ pip install -r requirements.txt
    Para poblar la tabla automáticamente instala **Tesseract** (binario del SO +
    `pytesseract`) o, alternativamente, `easyocr` (`pip install easyocr`). El
    pipeline usará Tesseract si está disponible y caerá en EasyOCR como backup.
+   A partir de esta versión también se incluye un OCR avanzado basado en
+   **Hugging Face TrOCR** (`transformers` + `torch`); la primera ejecución
+   descargará el checkpoint `microsoft/trocr-base-printed` (≈350 MB). Puedes
+   cambiarlo estableciendo la variable de entorno
+   `TABULAR_HF_OCR_MODEL="<repo/modelo>"` antes de lanzar la demo.
 
 3. Lanza la demo con Streamlit (se puede hacer desde la raíz del repo o desde
    la carpeta `src/`):

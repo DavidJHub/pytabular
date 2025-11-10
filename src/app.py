@@ -33,7 +33,7 @@ import streamlit as st
 
 from image_utils import ImageUtils
 from pipeline import PipelineConfig, TableExtractionPipeline
-from ocr import EASYOCR_OK, TESSERACT_OK
+from ocr import EASYOCR_OK, HF_OCR_OK, TESSERACT_OK
 
 
 st.set_page_config(page_title="TABULAR:APP — OCR de Tablas (Python)", layout="wide")
@@ -65,14 +65,14 @@ with st.sidebar:
     manual_rows = st.number_input("Filas (manual)", min_value=1, max_value=200, value=6)
     manual_cols = st.number_input("Columnas (manual)", min_value=1, max_value=50, value=4)
 
-    default_ocr = TESSERACT_OK or EASYOCR_OK
+    default_ocr = TESSERACT_OK or EASYOCR_OK or HF_OCR_OK
     if not default_ocr:
         st.info(
-            "ℹ️ No se detectó un motor OCR. Instala Tesseract o `easyocr` y reinicia la app "
-            "para completar automáticamente las celdas."
+            "ℹ️ No se detectó un motor OCR. Instala Tesseract, `easyocr` o configura el "
+            "modelo Hugging Face (TrOCR) para completar automáticamente las celdas."
         )
     do_ocr = st.checkbox(
-        "Hacer OCR para llenar celdas (usa Tesseract/EasyOCR si están disponibles)",
+        "Hacer OCR para llenar celdas (Tesseract, EasyOCR o Hugging Face)",
         value=default_ocr,
     )
     tess_lang = st.text_input("Idioma Tesseract (lang)", value="eng")
