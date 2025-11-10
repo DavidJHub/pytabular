@@ -1,43 +1,42 @@
-"""Streamlit demo that visualizes each step of the table extraction pipeline."""
+"""Command line demo for the table extraction pipeline."""
 
 from __future__ import annotations
 
-import io
-import sys
+import argparse
+import json
 from pathlib import Path
-from typing import Iterable, Sequence, Tuple
-from zipfile import ZIP_DEFLATED, ZipFile
+from typing import Iterable, List, Sequence, Tuple
+
 
 import cv2
 import pandas as pd
-import streamlit as st
-from PIL import Image
-
-
-APP_DIR = Path(__file__).resolve().parent
-ROOT_DIR = APP_DIR.parent
-for candidate in (APP_DIR, ROOT_DIR):
-    path_str = str(candidate)
-    if path_str not in sys.path:
-        sys.path.insert(0, path_str)
-
-from image_utils import ImageUtils
 from pipeline import PipelineConfig, TableExtractionPipeline
 
 
-BoxTuple = Tuple[int, int, int, int]
-
-
 def _ensure_color(image: cv2.Mat) -> cv2.Mat:
-    """Return a 3-channel BGR image for visualization."""
+    """Garantiza que la imagen sea BGR de 3 canales."""
 
-    if image is None:
-        raise ValueError("Cannot normalize a None image")
     if image.ndim == 2:
         return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     if image.shape[2] == 4:
         return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
     return image.copy()
+
+
+def _color_from_indices(row_idx: int | None, col_idx: int | None) -> tuple[int, int, int]:
+    """Color determinista basado en los índices de fila/columna."""
+
+    if row_idx is None or col_idx is None:
+        return 180, 180, 180
+    seed = int(row_idx) * 53 + int(col_idx) * 97
+    return (
+        60 + (seed * 29) % 196,
+        60 + (seed * 47) % 196,
+        60 + (seed * 71) % 196,
+    )
+
+
+BoxTuple = Tuple[int, int, int, int]
 
 
 def _iter_boxes(boxes: Sequence[BoxTuple] | pd.DataFrame) -> Iterable[BoxTuple]:
@@ -52,23 +51,24 @@ def _iter_boxes(boxes: Sequence[BoxTuple] | pd.DataFrame) -> Iterable[BoxTuple]:
             yield int(x1), int(y1), int(x2), int(y2)
 
 
-def _draw_boxes(
-    image: cv2.Mat,
-    boxes: Sequence[BoxTuple] | pd.DataFrame,
-    color: Tuple[int, int, int],
-    thickness: int = 2,
+def draw_detection_boxes(
+    image: cv2.Mat, boxes: Sequence[BoxTuple] | pd.DataFrame
 ) -> cv2.Mat:
-    """Overlay rectangles for the provided boxes on top of the reference image."""
+    """Dibuja los cuadros detectados sobre la imagen deskewed."""
 
     canvas = _ensure_color(image)
     overlay = canvas.copy()
+
     for x1, y1, x2, y2 in _iter_boxes(boxes):
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
+        pt1 = (x1, y1)
+        pt2 = (x2, y2)
+        cv2.rectangle(overlay, pt1, pt2, (40, 220, 40), 2)
+
     return overlay
 
 
 def draw_cluster_boxes(image: cv2.Mat, boxes_df: pd.DataFrame) -> cv2.Mat:
-    """Visualize cluster assignments (row, col) using deterministic colors."""
+    """Dibuja los clusters finales (fila, columna) sobre la imagen deskewed."""
 
     canvas = _ensure_color(image)
     overlay = canvas.copy()
@@ -76,20 +76,10 @@ def draw_cluster_boxes(image: cv2.Mat, boxes_df: pd.DataFrame) -> cv2.Mat:
     for row in boxes_df.itertuples():
         pt1 = (int(row.x1), int(row.y1))
         pt2 = (int(row.x2), int(row.y2))
-        row_idx = getattr(row, "row")
-        col_idx = getattr(row, "col")
-        if row_idx is None or col_idx is None:
-            color = (180, 180, 180)
-        else:
-            seed = int(row_idx) * 53 + int(col_idx) * 97
-            color = (
-                60 + (seed * 29) % 196,
-                60 + (seed * 47) % 196,
-                60 + (seed * 71) % 196,
-            )
+        color = _color_from_indices(getattr(row, "row"), getattr(row, "col"))
         cv2.rectangle(overlay, pt1, pt2, color, 2)
-        if row_idx is not None and col_idx is not None:
-            label = f"{row_idx},{col_idx}"
+        if row.row is not None and row.col is not None:
+            label = f"{row.row},{row.col}"
             text_origin = (pt1[0] + 2, pt1[1] + 18)
             cv2.putText(
                 overlay,
@@ -101,295 +91,124 @@ def draw_cluster_boxes(image: cv2.Mat, boxes_df: pd.DataFrame) -> cv2.Mat:
                 1,
                 lineType=cv2.LINE_AA,
             )
+
     return overlay
 
 
-def _boxes_to_pil(
-    image: cv2.Mat,
-    boxes: Sequence[BoxTuple] | pd.DataFrame,
-    color: Tuple[int, int, int],
-    thickness: int = 2,
-) -> Image.Image | None:
-    if not boxes:
-        return None
-    overlay = _draw_boxes(image, boxes, color=color, thickness=thickness)
-    return ImageUtils.cv2_to_pil(overlay)
-
-
-def _pil_to_png_bytes(image: Image.Image) -> bytes:
-    buffer = io.BytesIO()
-    image.save(buffer, format="PNG")
-    return buffer.getvalue()
-
-
-def _boxes_df_to_csv(df: pd.DataFrame) -> bytes:
-    buffer = io.StringIO()
-    df.to_csv(buffer, index=False)
-    return buffer.getvalue().encode("utf-8")
-
-
-# Streamlit bootstrap expects to own the runtime, so the UI lives in
-# ``_render_app``. ``run_app()`` detects if we were launched via ``streamlit run``
-# or ``python src/demo.py`` and either renders directly or bootstraps the
-# Streamlit server programmatically.
-
-
-def _render_app() -> None:
-    st.set_page_config(page_title="Pipeline demo", layout="wide")
-    st.title("📊 Table Extraction Pipeline — Demo paso a paso")
-    st.write(
-        "Sube una o varias imágenes de tablas y visualiza cómo el pipeline las "
-        "deskewea, detecta el texto, agrupa los cuadros y construye la tabla final."
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Demo interactiva de extracción de tablas")
+    parser.add_argument(
+        "--image",
+        "-i",
+        nargs="+",
+        required=True,
+        help="Ruta(s) de imagen con tablas",
     )
-
-    with st.sidebar:
-        st.header("Parámetros del pipeline")
-        canny1 = st.slider("Canny th1", 0, 200, 50, 1)
-        canny2 = st.slider("Canny th2", 0, 300, 150, 1)
-        hough_th = st.slider("Hough threshold", 10, 300, 120, 5)
-        score_th = st.slider("Score mínimo EAST", 0.1, 0.9, 0.5, 0.05)
-        nms_th = st.slider("NMS IoU", 0.1, 0.9, 0.3, 0.05)
-        merge_row_tol = st.slider("Tolerancia vertical unión cajas", 2, 40, 10, 1)
-        merge_gap_tol = st.slider("Separación horizontal unión", 2, 80, 18, 1)
-        row_tol = st.slider("Tolerancia filas (agrupación)", 2, 50, 12, 1)
-        col_tol = st.slider("Tolerancia columnas (agrupación)", 5, 80, 24, 1)
-        prefer_left = st.checkbox("Priorizar alineación por borde izquierdo", value=True)
-        do_ocr = st.checkbox("Ejecutar OCR (Tesseract)", value=False)
-        tess_lang = st.text_input("Idioma OCR", value="eng")
-        auto_shape = st.checkbox("Estimar filas/columnas automáticamente", value=True)
-        manual_rows = st.number_input("Filas manual", min_value=1, max_value=200, value=6)
-        manual_cols = st.number_input("Columnas manual", min_value=1, max_value=50, value=4)
-
-    uploaded_files = st.file_uploader(
-        "Selecciona imágenes de tablas (JPG/PNG)",
-        type=["jpg", "jpeg", "png"],
-        accept_multiple_files=True,
+    parser.add_argument(
+        "--output",
+        "-o",
+        type=Path,
+        default=Path("outputs"),
+        help="Directorio donde se almacenarán los resultados",
     )
+    parser.add_argument("--score", type=float, default=0.5, help="Umbral de score para EAST")
+    parser.add_argument("--nms", type=float, default=0.3, help="Umbral IoU para NMS")
+    parser.add_argument("--row-tol", type=int, default=12, help="Tolerancia vertical para agrupar filas")
+    parser.add_argument("--col-tol", type=int, default=24, help="Tolerancia horizontal para agrupar columnas")
+    parser.add_argument(
+        "--merge-gap",
+        type=int,
+        default=18,
+        help="Separación horizontal máxima (px) para unir cajas consecutivas",
+    )
+    parser.add_argument(
+        "--merge-row",
+        type=int,
+        default=10,
+        help="Tolerancia vertical (px) para decidir si dos cajas pertenecen a la misma línea",
+    )
+    parser.add_argument("--prefer-left", action="store_true", help="Priorizar alineación por el borde izquierdo")
+    parser.add_argument("--ocr", action="store_true", help="Activar OCR con Tesseract si está disponible")
+    parser.add_argument("--lang", default="eng", help="Idioma para OCR")
+    parser.add_argument("--manual-rows", type=int, default=None, help="Forzar número de filas en la tabla")
+    parser.add_argument("--manual-cols", type=int, default=None, help="Forzar número de columnas en la tabla")
+    return parser.parse_args()
 
-    if not uploaded_files:
-        st.info("Sube al menos una imagen para ejecutar el pipeline.")
-        st.stop()
 
-    @st.cache_resource(show_spinner=False)
-    def _load_pipeline() -> TableExtractionPipeline:
-        try:
-            return TableExtractionPipeline()
-        except FileNotFoundError:
-            st.error(
-                "❌ No fue posible inicializar el detector EAST. "
-                "Descarga manualmente `frozen_east_text_detection.pb` y colócalo en la carpeta `src/`."
-            )
-            st.stop()
+def load_image(path: Path) -> cv2.Mat:
+    image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if image is None:
+        raise FileNotFoundError(f"No se pudo leer la imagen: {path}")
+    return image
 
-    pipeline = _load_pipeline()
 
-    for uploaded in uploaded_files:
-        st.markdown("---")
-        st.header(f"🖼️ {uploaded.name}")
+def run_demo(image_paths: List[Path], output_dir: Path, args: argparse.Namespace) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    pipeline = TableExtractionPipeline()
 
-        image = Image.open(uploaded).convert("RGB")
-        image_bgr = ImageUtils.pil_to_cv2(image)
-
+    summaries = []
+    for img_path in image_paths:
+        image = load_image(img_path)
         cfg = PipelineConfig(
-            canny1=canny1,
-            canny2=canny2,
-            hough_thresh=hough_th,
-            score_thresh=score_th,
-            nms_thresh=nms_th,
-            row_tol=row_tol,
-            col_tol=col_tol,
-            prefer_left_alignment=prefer_left,
-            merge_row_tol=merge_row_tol,
-            merge_gap_tol=merge_gap_tol,
-            do_ocr=do_ocr,
-            ocr_lang=tess_lang,
-            manual_rows=None if auto_shape else int(manual_rows),
-            manual_cols=None if auto_shape else int(manual_cols),
+            score_thresh=args.score,
+            nms_thresh=args.nms,
+            row_tol=args.row_tol,
+            col_tol=args.col_tol,
+            prefer_left_alignment=args.prefer_left,
+            merge_gap_tol=args.merge_gap,
+            merge_row_tol=args.merge_row,
+            do_ocr=args.ocr,
+            ocr_lang=args.lang,
+            manual_rows=args.manual_rows,
+            manual_cols=args.manual_cols,
         )
 
-        with st.spinner("Ejecutando pipeline…"):
-            result, debug_payload = pipeline.process(image_bgr, config=cfg, debug=True)
+        result, _ = pipeline.process(image, config=cfg, debug=False)
 
-        st.caption(
-            f"Ángulo estimado: {result.angle_deg:.2f}° | Celdas: {result.n_rows}×{result.n_cols}"
-        )
+        base_name = img_path.stem
+        image_output_dir = output_dir / base_name
+        image_output_dir.mkdir(exist_ok=True, parents=True)
 
-        # Preprocesamiento
-        st.subheader("1. Preprocesamiento")
-        pre_cols = st.columns(4)
-        original_pil = image
-        deskewed_pil = ImageUtils.cv2_to_pil(result.deskewed)
-        pre_cols[0].image(original_pil, caption="Original", use_column_width=True)
-        pre_cols[1].image(deskewed_pil, caption="Deskewed", use_column_width=True)
+        deskewed_path = image_output_dir / f"{base_name}_deskewed.png"
+        cv2.imwrite(str(deskewed_path), result.deskewed)
 
-        deskew_debug = debug_payload.get("deskew", {})
-        edges_img = deskew_debug.get("edges")
-        hough_overlay = deskew_debug.get("hough_overlay")
+        table_csv = image_output_dir / f"{base_name}_table.csv"
+        table_xlsx = image_output_dir / f"{base_name}_table.xlsx"
+        boxes_csv = image_output_dir / f"{base_name}_boxes.csv"
 
-        edges_pil = (
-            ImageUtils.cv2_to_pil(_ensure_color(edges_img)) if edges_img is not None else None
-        )
-        hough_pil = (
-            ImageUtils.cv2_to_pil(_ensure_color(hough_overlay))
-            if hough_overlay is not None
-            else None
-        )
-
-        if edges_img is not None:
-            pre_cols[2].image(edges_pil, caption="Canny / bordes", use_column_width=True)
-        else:
-            pre_cols[2].empty()
-
-        if hough_overlay is not None:
-            pre_cols[3].image(hough_pil, caption="Overlay Hough", use_column_width=True)
-        else:
-            pre_cols[3].empty()
-
-        # Detección
-        st.subheader("2. Detección de texto")
-        raw_boxes = debug_payload.get("raw_boxes", [])
-        merged_boxes = debug_payload.get("merged_boxes", [])
-        final_boxes = debug_payload.get("final_boxes", [])
-
-        det_cols = st.columns(3)
-        raw_img = _boxes_to_pil(result.deskewed, raw_boxes, color=(0, 0, 255))
-        merged_img = _boxes_to_pil(result.deskewed, merged_boxes, color=(40, 220, 40))
-        final_img = _boxes_to_pil(result.deskewed, final_boxes, color=(255, 180, 0))
-
-        if raw_img is not None:
-            det_cols[0].image(raw_img, caption="Cajas EAST crudas", use_column_width=True)
-        else:
-            det_cols[0].info("Sin cajas detectadas")
-
-        if merged_img is not None:
-            det_cols[1].image(merged_img, caption="Post-fusión (solapes)", use_column_width=True)
-        else:
-            det_cols[1].empty()
-
-        if final_img is not None:
-            det_cols[2].image(final_img, caption="Cajas finales a agrupar", use_column_width=True)
-        else:
-            det_cols[2].empty()
-
-        # Clustering
-        st.subheader("3. Clustering de filas/columnas")
-        clusters_img = draw_cluster_boxes(result.deskewed, result.boxes_df)
-        clusters_pil = ImageUtils.cv2_to_pil(clusters_img)
-        st.image(clusters_pil, caption="Asignación (fila, columna)", use_column_width=True)
-
-        # Tabla final
-        st.subheader("4. Tabla resultante")
-        st.dataframe(result.table, use_container_width=True)
-
-        csv_bytes = result.table.to_csv(index=False).encode("utf-8")
-        excel_buffer = io.BytesIO()
-        with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
+        result.table.to_csv(table_csv, index=False)
+        with pd.ExcelWriter(table_xlsx, engine="openpyxl") as writer:
             result.table.to_excel(writer, index=False, sheet_name="Sheet1")
-        boxes_csv = _boxes_df_to_csv(result.boxes_df)
 
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.download_button(
-                "⬇️ Descargar tabla CSV",
-                data=csv_bytes,
-                file_name=f"{uploaded.name}_table.csv",
-                mime="text/csv",
-            )
-        with c2:
-            st.download_button(
-                "⬇️ Descargar tabla Excel",
-                data=excel_buffer.getvalue(),
-                file_name=f"{uploaded.name}_table.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        with c3:
-            st.download_button(
-                "⬇️ Cajas detectadas (CSV)",
-                data=boxes_csv,
-                file_name=f"{uploaded.name}_boxes.csv",
-                mime="text/csv",
-            )
+        result.boxes_df.to_csv(boxes_csv, index=False)
 
-        stage_images = {
-            "original": original_pil,
-            "deskewed": deskewed_pil,
-            "edges": edges_pil,
-            "hough_overlay": hough_pil,
-            "east_raw": raw_img,
-            "east_merged": merged_img,
-            "east_final": final_img,
-            "clusters": clusters_pil,
-        }
-
-        zip_buffer = io.BytesIO()
-        with ZipFile(zip_buffer, mode="w", compression=ZIP_DEFLATED) as zf:
-            stem = Path(uploaded.name).stem
-            for label, pil_image in stage_images.items():
-                if pil_image is None:
-                    continue
-                zf.writestr(f"{stem}_{label}.png", _pil_to_png_bytes(pil_image))
-            zf.writestr(f"{stem}_table.csv", csv_bytes)
-            zf.writestr(
-                f"{stem}_table.xlsx",
-                excel_buffer.getvalue(),
-            )
-            zf.writestr(f"{stem}_boxes.csv", boxes_csv)
-
-        zip_bytes = zip_buffer.getvalue()
-
-        st.download_button(
-            "⬇️ Descargar paquete (ZIP)",
-            data=zip_bytes,
-            file_name=f"{Path(uploaded.name).stem}_resultados.zip",
-            mime="application/zip",
+        summaries.append(
+            {
+                "image": str(img_path),
+                "deskew_angle": result.angle_deg,
+                "boxes": len(result.boxes_df),
+                "rows": result.n_rows,
+                "cols": result.n_cols,
+                "table_csv": str(table_csv),
+                "table_xlsx": str(table_xlsx),
+                "boxes_csv": str(boxes_csv),
+                "deskewed_image": str(deskewed_path),
+            }
         )
 
-    with st.expander("Ver dataframe de cajas"):
-        st.dataframe(result.boxes_df, use_container_width=True)
+    summary_path = output_dir / "summary.json"
+    with summary_path.open("w", encoding="utf-8") as fp:
+        json.dump(summaries, fp, ensure_ascii=False, indent=2)
+
+    print("\nResumen del procesamiento:")
+    print(json.dumps(summaries, indent=2, ensure_ascii=False))
 
 
-def run_app() -> None:
-    """Render the Streamlit demo, bootstrapping Streamlit when run via ``python``."""
-
-    try:
-        from streamlit.runtime.scriptrunner import get_script_run_ctx
-    except ModuleNotFoundError:
-        # Extremely old Streamlit versions: fall back to plain rendering which will
-        # instruct the user to launch via ``streamlit run``.
-        get_script_run_ctx = lambda: None  # type: ignore
-
-    ctx = get_script_run_ctx()
-    if ctx is None:
-        # Ejecutado como ``python src/demo.py``. En algunos entornos (Windows /
-        # shells antiguos) ``streamlit.web.bootstrap`` puede delegar en el
-        # parser legacy del script original, volviendo a exigir ``--image``.
-        # Para evitarlo levantamos explícitamente el servidor Streamlit via
-        # subprocess, emulando ``streamlit run``.
-        script_path = str(Path(__file__).resolve())
-
-        try:
-            from streamlit.web import bootstrap
-        except ModuleNotFoundError:
-            bootstrap = None  # type: ignore
-
-        if bootstrap is not None:
-            # ``bootstrap.run`` necesita limpiar ``sys.argv`` para que ninguna
-            # bandera antigua llegue al runner.
-            sys_argv_backup = sys.argv[:]
-            sys.argv = ["streamlit", "run", script_path]
-            try:
-                bootstrap.run(script_path, "run", [], {})
-            finally:
-                sys.argv = sys_argv_backup
-        else:
-            import subprocess
-
-            cmd = [sys.executable, "-m", "streamlit", "run", script_path]
-            subprocess.check_call(cmd)
-        return
-
-    _render_app()
+def main() -> None:
+    args = parse_args()
+    image_paths = [Path(p) for p in args.image]
+    run_demo(image_paths, args.output, args)
 
 
 if __name__ == "__main__":
-    run_app()
+    main()
