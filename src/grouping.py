@@ -1,52 +1,258 @@
-"""Utilities to group detected text boxes into table rows and columns."""
+"""Utilities to post-process detected text boxes for table reconstruction."""
 
-from typing import Dict, List, Tuple
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Iterable, List, Sequence, Tuple
 
 import numpy as np
+import pandas as pd
+
+
+@dataclass(frozen=True)
+class TextBox:
+    """Lightweight representation of a detected text block."""
+
+    x1: int
+    y1: int
+    x2: int
+    y2: int
+
+    @property
+    def width(self) -> int:
+        return max(0, self.x2 - self.x1)
+
+    @property
+    def height(self) -> int:
+        return max(0, self.y2 - self.y1)
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return (self.x1 + self.width / 2.0, self.y1 + self.height / 2.0)
+
+
+def _vertical_overlap(a: TextBox, b: TextBox) -> float:
+    top = max(a.y1, b.y1)
+    bottom = min(a.y2, b.y2)
+    return max(0.0, bottom - top)
 
 
 def merge_intersecting_boxes(
-    boxes: List[Tuple[int, int, int, int]], iou_thresh: float = 0.0
-) -> List[Tuple[int, int, int, int]]:
+    boxes: Sequence[Tuple[int, int, int, int]],
+    scores: Sequence[float] | None = None,
+    return_sources: bool = False,
+) -> Tuple[List[Tuple[int, int, int, int]], List[float]] | Tuple[
+    List[Tuple[int, int, int, int]],
+    List[float],
+    List[Tuple[int, ...]],
+]:
+    """Merge overlapping boxes and optionally propagate scores/original ids."""
+
     if not boxes:
-        return []
-    boxes_np = np.array(boxes, dtype=np.int32)
-    merged = True
-    while merged:
-        merged = False
-        new_boxes = []
-        used = np.zeros(len(boxes_np), dtype=bool)
-        for i in range(len(boxes_np)):
-            if used[i]:
+        if return_sources:
+            return [], [], []
+        return [], []
+
+    boxes_arr = np.array(boxes, dtype=np.int32)
+    if scores is None or len(scores) != len(boxes):
+        scores_arr = np.ones(len(boxes), dtype=np.float32)
+    else:
+        scores_arr = np.array(scores, dtype=np.float32)
+
+    parent = np.arange(len(boxes_arr))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        pi, pj = find(i), find(j)
+        if pi != pj:
+            parent[pj] = pi
+
+    for i in range(len(boxes_arr)):
+        x1a, y1a, x2a, y2a = boxes_arr[i]
+        for j in range(i + 1, len(boxes_arr)):
+            x1b, y1b, x2b, y2b = boxes_arr[j]
+            xx1 = max(x1a, x1b)
+            yy1 = max(y1a, y1b)
+            xx2 = min(x2a, x2b)
+            yy2 = min(y2a, y2b)
+            if xx1 < xx2 and yy1 < yy2:
+                union(i, j)
+
+    clusters: Dict[int, List[int]] = {}
+    for idx in range(len(boxes_arr)):
+        root = find(idx)
+        clusters.setdefault(root, []).append(idx)
+
+    merged_boxes: List[Tuple[int, int, int, int]] = []
+    merged_scores: List[float] = []
+    sources: List[Tuple[int, ...]] = []
+    for indices in clusters.values():
+        x1 = int(np.min(boxes_arr[indices, 0]))
+        y1 = int(np.min(boxes_arr[indices, 1]))
+        x2 = int(np.max(boxes_arr[indices, 2]))
+        y2 = int(np.max(boxes_arr[indices, 3]))
+        merged_boxes.append((x1, y1, x2, y2))
+        merged_scores.append(float(np.max(scores_arr[indices])))
+        sources.append(tuple(int(i) for i in indices))
+
+    if return_sources:
+        return merged_boxes, merged_scores, sources
+    return merged_boxes, merged_scores
+
+
+def build_box_dataframe(
+    boxes: Sequence[Tuple[int, int, int, int]],
+    scores: Sequence[float] | None = None,
+    sources: Iterable[Sequence[int]] | None = None,
+) -> pd.DataFrame:
+    """Create a dataframe describing every detected/merged box."""
+
+    if not boxes:
+        return pd.DataFrame(
+            columns=[
+                "id",
+                "x1",
+                "y1",
+                "x2",
+                "y2",
+                "width",
+                "height",
+                "center_x",
+                "center_y",
+                "score",
+                "source_ids",
+                "text",
+            ]
+        )
+
+    if scores is None or len(scores) != len(boxes):
+        scores = [1.0] * len(boxes)
+    if sources is None:
+        sources = [[i] for i in range(len(boxes))]
+
+    records = []
+    for idx, (box, score, src) in enumerate(zip(boxes, scores, sources)):
+        tb = TextBox(*map(int, box))
+        cx, cy = tb.center
+        records.append(
+            {
+                "id": idx,
+                "x1": int(tb.x1),
+                "y1": int(tb.y1),
+                "x2": int(tb.x2),
+                "y2": int(tb.y2),
+                "width": int(tb.width),
+                "height": int(tb.height),
+                "center_x": float(cx),
+                "center_y": float(cy),
+                "score": float(score),
+                "source_ids": tuple(int(s) for s in src),
+                "text": "",
+            }
+        )
+    return pd.DataFrame.from_records(records)
+
+
+def merge_line_aligned_boxes(
+    df: pd.DataFrame,
+    row_tol: float,
+    gap_tol: float,
+    min_vertical_overlap: float = 0.55,
+) -> pd.DataFrame:
+    """Fuse neighbouring boxes that likely belong to the same word/line."""
+
+    if df.empty:
+        return df
+
+    result_rows: List[Dict] = []
+    tol_y = max(row_tol, float(df["height"].median() * 0.45 if len(df) else row_tol))
+
+    df_sorted = df.sort_values("center_y").reset_index(drop=True)
+    row_clusters: List[List[int]] = []
+    current = [0]
+    for idx in range(1, len(df_sorted)):
+        prev = df_sorted.loc[idx - 1]
+        cur = df_sorted.loc[idx]
+        if abs(cur["center_y"] - prev["center_y"]) <= tol_y:
+            current.append(idx)
+        else:
+            row_clusters.append(current)
+            current = [idx]
+    row_clusters.append(current)
+
+    for cluster in row_clusters:
+        boxes_cluster = df_sorted.loc[cluster].sort_values("x1")
+        merged_stack: List[Dict] = []
+        for _, row in boxes_cluster.iterrows():
+            tb = TextBox(row.x1, row.y1, row.x2, row.y2)
+            if not merged_stack:
+                merged_stack.append(row.to_dict())
                 continue
-            x1a, y1a, x2a, y2a = boxes_np[i]
-            cur = np.array([x1a, y1a, x2a, y2a])
-            for j in range(i + 1, len(boxes_np)):
-                if used[j]:
-                    continue
-                x1b, y1b, x2b, y2b = boxes_np[j]
-                xx1 = max(x1a, x1b)
-                yy1 = max(y1a, y1b)
-                xx2 = min(x2a, x2b)
-                yy2 = min(y2a, y2b)
-                iw = max(0, xx2 - xx1)
-                ih = max(0, yy2 - yy1)
-                inter = iw * ih
-                if inter > 0:
-                    cur = np.array(
-                        [
-                            min(cur[0], x1b),
-                            min(cur[1], y1b),
-                            max(cur[2], x2b),
-                            max(cur[3], y2b),
-                        ]
-                    )
-                    used[j] = True
-                    merged = True
-            used[i] = True
-            new_boxes.append(tuple(map(int, cur.tolist())))
-        boxes_np = np.array(new_boxes, dtype=np.int32)
-    return [tuple(map(int, b)) for b in boxes_np]
+            last = merged_stack[-1]
+            last_tb = TextBox(last["x1"], last["y1"], last["x2"], last["y2"])
+            vertical_overlap = _vertical_overlap(tb, last_tb)
+            min_height = max(1.0, min(tb.height, last_tb.height))
+            overlap_ratio = vertical_overlap / min_height
+            horizontal_gap = tb.x1 - last_tb.x2
+            if horizontal_gap <= gap_tol and overlap_ratio >= min_vertical_overlap:
+                last["x1"] = int(min(last_tb.x1, tb.x1))
+                last["y1"] = int(min(last_tb.y1, tb.y1))
+                last["x2"] = int(max(last_tb.x2, tb.x2))
+                last["y2"] = int(max(last_tb.y2, tb.y2))
+                last["width"] = int(last["x2"] - last["x1"])
+                last["height"] = int(last["y2"] - last["y1"])
+                last["center_x"] = float(last["x1"] + last["width"] / 2.0)
+                last["center_y"] = float(last["y1"] + last["height"] / 2.0)
+                last["score"] = float(max(last["score"], row["score"]))
+                last["source_ids"] = tuple(sorted(set(last["source_ids"]) | set(row["source_ids"])))
+            else:
+                merged_stack.append(row.to_dict())
+        result_rows.extend(merged_stack)
+
+    merged_df = pd.DataFrame(result_rows).reset_index(drop=True)
+    merged_df["id"] = merged_df.index
+    return merged_df
+
+
+def _cluster_axis(
+    coords: np.ndarray,
+    spans: np.ndarray,
+    base_tol: float,
+) -> List[List[int]]:
+    """Cluster 1D coordinates using adaptive gaps based on neighbour spans."""
+
+    if len(coords) == 0:
+        return []
+
+    order = np.argsort(coords)
+    clusters: List[List[int]] = []
+    current: List[int] = [int(order[0])]
+
+    def _adaptive_tol(i_prev: int, i_cur: int) -> float:
+        span_prev = spans[i_prev]
+        span_cur = spans[i_cur]
+        # Use the average span scaled by a factor so tall boxes tolerate
+        # proportionally larger gaps. ``0.6`` worked well in empirical tests.
+        span_tol = 0.6 * 0.5 * (span_prev + span_cur)
+        return max(base_tol, span_tol)
+
+    for idx in range(1, len(order)):
+        prev_idx = int(order[idx - 1])
+        cur_idx = int(order[idx])
+        gap = abs(float(coords[cur_idx]) - float(coords[prev_idx]))
+        if gap <= _adaptive_tol(prev_idx, cur_idx):
+            current.append(cur_idx)
+        else:
+            clusters.append(current)
+            current = [cur_idx]
+
+    clusters.append(current)
+    return clusters
 
 
 def group_rows_columns(
@@ -57,41 +263,37 @@ def group_rows_columns(
 ) -> Tuple[List[List[int]], List[List[int]]]:
     if not boxes:
         return [], []
-    xs1 = np.array([b[0] for b in boxes])
-    ys1 = np.array([b[1] for b in boxes])
-    xs2 = np.array([b[2] for b in boxes])
-    ys2 = np.array([b[3] for b in boxes])
-    cy = (ys1 + ys2) / 2.0
+
+    xs1 = np.array([b[0] for b in boxes], dtype=np.float32)
+    ys1 = np.array([b[1] for b in boxes], dtype=np.float32)
+    xs2 = np.array([b[2] for b in boxes], dtype=np.float32)
+    ys2 = np.array([b[3] for b in boxes], dtype=np.float32)
+
+    widths = np.maximum(1.0, xs2 - xs1)
+    heights = np.maximum(1.0, ys2 - ys1)
     cx = (xs1 + xs2) / 2.0
-    order_y = np.argsort(cy)
-    row_groups: List[List[int]] = []
-    current = [int(order_y[0])]
-    for k in range(1, len(order_y)):
-        i_prev = int(order_y[k - 1])
-        i_cur = int(order_y[k])
-        if abs(cy[i_cur] - cy[i_prev]) <= row_tol:
-            current.append(i_cur)
-        else:
-            row_groups.append(sorted(current, key=lambda idx: boxes[idx][0]))
-            current = [i_cur]
-    row_groups.append(sorted(current, key=lambda idx: boxes[idx][0]))
+    cy = (ys1 + ys2) / 2.0
+
+    adaptive_row_tol = max(float(row_tol), float(np.median(heights) * 0.55))
+    adaptive_col_tol = max(float(col_tol), float(np.median(widths) * 0.45))
+
+    row_clusters = _cluster_axis(cy, heights, adaptive_row_tol)
+    # Sort boxes within the row from left to right for consistent ordering.
+    row_groups: List[List[int]] = [
+        sorted(cluster, key=lambda idx: cx[idx]) for cluster in row_clusters
+    ]
+
     key_x = xs1 if prefer_left_alignment else cx
-    order_x = np.argsort(key_x)
-    col_groups: List[List[int]] = []
-    current = [int(order_x[0])]
-    for k in range(1, len(order_x)):
-        j_prev = int(order_x[k - 1])
-        j_cur = int(order_x[k])
-        if abs(key_x[j_cur] - key_x[j_prev]) <= col_tol:
-            current.append(j_cur)
-        else:
-            col_groups.append(
-                sorted(current, key=lambda idx: (boxes[idx][1] + boxes[idx][3]) / 2.0)
-            )
-            current = [j_cur]
-    col_groups.append(
-        sorted(current, key=lambda idx: (boxes[idx][1] + boxes[idx][3]) / 2.0)
-    )
+    col_clusters = _cluster_axis(key_x, widths, adaptive_col_tol)
+    # Sort boxes within the column from top to bottom.
+    col_groups: List[List[int]] = [
+        sorted(cluster, key=lambda idx: cy[idx]) for cluster in col_clusters
+    ]
+
+    # Ensure the groups themselves are ordered consistently.
+    row_groups.sort(key=lambda grp: float(np.mean([cy[i] for i in grp])))
+    col_groups.sort(key=lambda grp: float(np.mean([key_x[i] for i in grp])))
+
     return row_groups, col_groups
 
 

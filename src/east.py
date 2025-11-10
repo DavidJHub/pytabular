@@ -33,6 +33,11 @@ class EastTextDetector:
                 "Descárgalo manualmente y colócalo como 'frozen_east_text_detection.pb' en la carpeta del app.\n"
                 + str(e)
             )
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(
+                "No se encontró el modelo EAST requerido en "
+                f"{os.path.abspath(model_path)}."
+            )
         return model_path
 
     @staticmethod
