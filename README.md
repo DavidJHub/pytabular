@@ -32,12 +32,9 @@ pip install -r requirements.txt
    También puedes ejecutar `python src/demo.py`, lo cual delega internamente en
    Streamlit para mayor comodidad.
 
-4. Abre el enlace local que aparece en la consola, arrastra y suelta una o más
-   imágenes de tablas y ajusta los parámetros desde la barra lateral para
-   inspeccionar cada etapa del pipeline (deskew, detección, clustering y tabla
-   final). Cada procesamiento expone botones de descarga tanto para la tabla
-   (CSV/XLSX) como para un paquete ZIP con todas las visualizaciones de cada
-   paso y los metadatos de cajas.
+4. Abre el enlace local que aparece en la consola, sube una o más imágenes de
+   tablas y ajusta los parámetros desde la barra lateral para inspeccionar cada
+   etapa del pipeline (deskew, detección, clustering y tabla final).
 
 ## Licencia
 
