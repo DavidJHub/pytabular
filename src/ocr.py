@@ -137,6 +137,33 @@ class OCRTableBuilder:
         except Exception:
             return ""
 
+        if TESSERACT_OK:
+            try:
+                cfg = "--psm 6 --oem 1"
+                data = pytesseract.image_to_data(
+                    roi_proc, lang=lang, config=cfg, output_type=Output.DICT
+                )
+                words = [w.strip() for w in data.get("text", []) if w and w.strip()]
+                if words:
+                    return " ".join(words)
+                txt = pytesseract.image_to_string(roi_proc, lang=lang, config=cfg)
+                return txt.strip()
+            except Exception:
+                pass
+
+        reader = _get_easyocr_reader(lang)
+        if reader is not None:
+            try:
+                roi_rgb = cv2.cvtColor(roi_color, cv2.COLOR_BGR2RGB)
+                results = reader.readtext(roi_rgb)
+                texts = [text.strip() for _, text, conf in results if text.strip()]
+                if texts:
+                    return " ".join(texts)
+            except Exception:
+                pass
+
+        return ""
+
     @staticmethod
     def ocr_text_from_box(
         image_bgr: np.ndarray, box: Tuple[int, int, int, int], lang: str = "eng"
