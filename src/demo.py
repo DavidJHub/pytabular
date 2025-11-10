@@ -5,11 +5,94 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Sequence, Tuple
+
 
 import cv2
 import pandas as pd
 from pipeline import PipelineConfig, TableExtractionPipeline
+
+
+def _ensure_color(image: cv2.Mat) -> cv2.Mat:
+    """Garantiza que la imagen sea BGR de 3 canales."""
+
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    return image.copy()
+
+
+def _color_from_indices(row_idx: int | None, col_idx: int | None) -> tuple[int, int, int]:
+    """Color determinista basado en los índices de fila/columna."""
+
+    if row_idx is None or col_idx is None:
+        return 180, 180, 180
+    seed = int(row_idx) * 53 + int(col_idx) * 97
+    return (
+        60 + (seed * 29) % 196,
+        60 + (seed * 47) % 196,
+        60 + (seed * 71) % 196,
+    )
+
+
+BoxTuple = Tuple[int, int, int, int]
+
+
+def _iter_boxes(boxes: Sequence[BoxTuple] | pd.DataFrame) -> Iterable[BoxTuple]:
+    """Yield boxes as integer tuples regardless of the container type."""
+
+    if isinstance(boxes, pd.DataFrame):
+        for row in boxes.itertuples():
+            yield (int(row.x1), int(row.y1), int(row.x2), int(row.y2))
+    else:
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            yield int(x1), int(y1), int(x2), int(y2)
+
+
+def draw_detection_boxes(
+    image: cv2.Mat, boxes: Sequence[BoxTuple] | pd.DataFrame
+) -> cv2.Mat:
+    """Dibuja los cuadros detectados sobre la imagen deskewed."""
+
+    canvas = _ensure_color(image)
+    overlay = canvas.copy()
+
+    for x1, y1, x2, y2 in _iter_boxes(boxes):
+        pt1 = (x1, y1)
+        pt2 = (x2, y2)
+        cv2.rectangle(overlay, pt1, pt2, (40, 220, 40), 2)
+
+    return overlay
+
+
+def draw_cluster_boxes(image: cv2.Mat, boxes_df: pd.DataFrame) -> cv2.Mat:
+    """Dibuja los clusters finales (fila, columna) sobre la imagen deskewed."""
+
+    canvas = _ensure_color(image)
+    overlay = canvas.copy()
+
+    for row in boxes_df.itertuples():
+        pt1 = (int(row.x1), int(row.y1))
+        pt2 = (int(row.x2), int(row.y2))
+        color = _color_from_indices(getattr(row, "row"), getattr(row, "col"))
+        cv2.rectangle(overlay, pt1, pt2, color, 2)
+        if row.row is not None and row.col is not None:
+            label = f"{row.row},{row.col}"
+            text_origin = (pt1[0] + 2, pt1[1] + 18)
+            cv2.putText(
+                overlay,
+                label,
+                text_origin,
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                color,
+                1,
+                lineType=cv2.LINE_AA,
+            )
+
+    return overlay
 
 
 def parse_args() -> argparse.Namespace:
