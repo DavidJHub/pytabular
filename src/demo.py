@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+
 import cv2
 import pandas as pd
 from pipeline import PipelineConfig, TableExtractionPipeline
@@ -141,110 +142,6 @@ def load_image(path: Path) -> cv2.Mat:
     return image
 
 
-def _draw_boxes_with_color(
-    image: cv2.Mat,
-    boxes: Sequence[BoxTuple] | pd.DataFrame,
-    color: Tuple[int, int, int],
-    thickness: int = 2,
-) -> cv2.Mat:
-    canvas = _ensure_color(image)
-    overlay = canvas.copy()
-    for x1, y1, x2, y2 in _iter_boxes(boxes):
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
-    return overlay
-
-
-def _normalize_to_bgr(image: cv2.Mat | None) -> cv2.Mat | None:
-    if image is None:
-        return None
-    return _ensure_color(image)
-
-
-def _export_pipeline_visuals(
-    original: cv2.Mat,
-    result: "PipelineResult",
-    debug_payload: dict,
-    output_dir: Path,
-    base_name: str,
-) -> Tuple[List[dict], dict]:
-    """Exporta imágenes representativas de cada paso del pipeline."""
-
-    output_dir.mkdir(exist_ok=True, parents=True)
-
-    step_images: List[dict] = []
-    key_map: dict[str, str | None] = {"deskewed": None, "segments": None, "clusters": None}
-
-    def save_step(image: cv2.Mat | None, step: str, description: str) -> str | None:
-        if image is None:
-            return None
-        path = output_dir / f"{base_name}_{step}.png"
-        cv2.imwrite(str(path), image)
-        step_images.append({"step": step, "description": description, "path": str(path)})
-        return str(path)
-
-    original_bgr = _normalize_to_bgr(original)
-    key_map["original"] = save_step(original_bgr, "00_original", "Imagen original de entrada")
-
-    deskewed_path = save_step(result.deskewed, "10_deskewed", "Imagen deskewed")
-    key_map["deskewed"] = deskewed_path
-
-    deskew_debug = debug_payload.get("deskew", {})
-    edges = _normalize_to_bgr(deskew_debug.get("edges"))
-    save_step(edges, "11_deskew_edges", "Bordes detectados durante el deskew")
-
-    hough_overlay = _normalize_to_bgr(deskew_debug.get("hough_overlay"))
-    save_step(hough_overlay, "12_deskew_hough", "Líneas Hough proyectadas para el deskew")
-
-    raw_boxes = debug_payload.get("raw_boxes", [])
-    raw_path: str | None = None
-    if raw_boxes:
-        raw_overlay = _draw_boxes_with_color(
-            result.deskewed, raw_boxes, color=(0, 0, 255)
-        )
-        raw_path = save_step(
-            raw_overlay,
-            "20_detection_raw",
-            "Cajas crudas devueltas por el detector EAST",
-        )
-        key_map["raw_detections"] = raw_path
-
-    merged_boxes = debug_payload.get("merged_boxes", [])
-    if merged_boxes:
-        merged_overlay = _draw_boxes_with_color(
-            result.deskewed, merged_boxes, color=(40, 220, 40)
-        )
-        segments_path = save_step(
-            merged_overlay,
-            "30_post_merge",
-            "Cajas tras fusionar solapamientos y líneas",
-        )
-        key_map["segments"] = segments_path
-
-    final_boxes = debug_payload.get("final_boxes", [])
-    if final_boxes:
-        final_overlay = _draw_boxes_with_color(
-            result.deskewed, final_boxes, color=(255, 180, 0)
-        )
-        save_step(
-            final_overlay,
-            "40_post_assign",
-            "Cajas finales previas a la asignación de filas/columnas",
-        )
-
-    clusters_image = draw_cluster_boxes(result.deskewed, result.boxes_df)
-    clusters_path = save_step(
-        clusters_image,
-        "50_clusters",
-        "Clusters finales con índices (fila, columna)",
-    )
-    key_map["clusters"] = clusters_path
-
-    if key_map.get("segments") is None and raw_path is not None:
-        key_map["segments"] = raw_path
-
-    return step_images, key_map
-
-
 def run_demo(image_paths: List[Path], output_dir: Path, args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     pipeline = TableExtractionPipeline()
@@ -266,19 +163,14 @@ def run_demo(image_paths: List[Path], output_dir: Path, args: argparse.Namespace
             manual_cols=args.manual_cols,
         )
 
-        result, debug_payload = pipeline.process(image, config=cfg, debug=True)
+        result, _ = pipeline.process(image, config=cfg, debug=False)
 
         base_name = img_path.stem
         image_output_dir = output_dir / base_name
         image_output_dir.mkdir(exist_ok=True, parents=True)
 
-        step_images, key_map = _export_pipeline_visuals(
-            original=image,
-            result=result,
-            debug_payload=debug_payload,
-            output_dir=image_output_dir,
-            base_name=base_name,
-        )
+        deskewed_path = image_output_dir / f"{base_name}_deskewed.png"
+        cv2.imwrite(str(deskewed_path), result.deskewed)
 
         table_csv = image_output_dir / f"{base_name}_table.csv"
         table_xlsx = image_output_dir / f"{base_name}_table.xlsx"
@@ -300,10 +192,7 @@ def run_demo(image_paths: List[Path], output_dir: Path, args: argparse.Namespace
                 "table_csv": str(table_csv),
                 "table_xlsx": str(table_xlsx),
                 "boxes_csv": str(boxes_csv),
-                "deskewed_image": key_map.get("deskewed"),
-                "segments_image": key_map.get("segments"),
-                "clusters_image": key_map.get("clusters"),
-                "pipeline_steps": step_images,
+                "deskewed_image": str(deskewed_path),
             }
         )
 
