@@ -32,14 +32,8 @@ from PIL import Image
 import streamlit as st
 
 from image_utils import ImageUtils
-from deskew import Deskewer
-from east import EastTextDetector
-from grouping import (
-    assign_cells_from_groups,
-    group_rows_columns,
-    merge_intersecting_boxes,
-)
-from ocr import OCRTableBuilder, TESSERACT_OK
+from pipeline import PipelineConfig, TableExtractionPipeline
+from ocr import EASYOCR_OK, HF_OCR_OK, TESSERACT_OK
 
 
 st.set_page_config(page_title="TABULAR:APP — OCR de Tablas (Python)", layout="wide")
@@ -62,12 +56,25 @@ with st.sidebar:
     col_tol = st.slider("Tolerancia columnas (px)", 5, 80, 24, 1)
     prefer_left = st.checkbox("Preferir alineación por borde izquierdo (columnas)", value=True)
 
+    st.markdown("**Post-procesamiento**")
+    merge_row_tol = st.slider("Tolerancia vertical para fusionar cajas (px)", 2, 40, 10, 1)
+    merge_gap_tol = st.slider("Separación horizontal máxima para fusionar (px)", 2, 80, 18, 1)
+
     st.markdown("**Tabla**")
     auto_shape = st.checkbox("Estimar automáticamente filas/columnas", value=True)
     manual_rows = st.number_input("Filas (manual)", min_value=1, max_value=200, value=6)
     manual_cols = st.number_input("Columnas (manual)", min_value=1, max_value=50, value=4)
 
-    do_ocr = st.checkbox("Hacer OCR para llenar celdas (Tesseract)", value=False)
+    default_ocr = TESSERACT_OK or EASYOCR_OK or HF_OCR_OK
+    if not default_ocr:
+        st.info(
+            "ℹ️ No se detectó un motor OCR. Instala Tesseract, `easyocr` o configura el "
+            "modelo Hugging Face (TrOCR) para completar automáticamente las celdas."
+        )
+    do_ocr = st.checkbox(
+        "Hacer OCR para llenar celdas (Tesseract, EasyOCR o Hugging Face)",
+        value=default_ocr,
+    )
     tess_lang = st.text_input("Idioma Tesseract (lang)", value="eng")
 
     st.markdown("**Depuración**")
@@ -84,7 +91,7 @@ uploaded_files = st.file_uploader(
 )
 
 if uploaded_files:
-    detector = EastTextDetector()
+    pipeline = TableExtractionPipeline()
 
     all_results = []
     zip_buffer = io.BytesIO()
@@ -97,32 +104,37 @@ if uploaded_files:
         img_pil = Image.open(up).convert("RGB")
         img_bgr = ImageUtils.pil_to_cv2(img_pil)
 
-        # 1) Deskew
-        deskewed, dbg_h = Deskewer.hough_deskew(img_bgr, canny1, canny2, hough_th, debug=True)
-        st.caption(f"Ángulo estimado: {dbg_h['angle_deg']:.2f}°")
-
-        # 2) EAST
-        boxes_east, scores_east, dbg_e = detector.detect(deskewed, score_th, nms_th, debug=True)
-        boxes_merged = merge_intersecting_boxes(boxes_east)
-
-        # 3) Grupos filas/columnas
-        row_groups, col_groups = group_rows_columns(
-            boxes_merged, row_tol=row_tol, col_tol=col_tol, prefer_left_alignment=prefer_left
+        cfg = PipelineConfig(
+            canny1=canny1,
+            canny2=canny2,
+            hough_thresh=hough_th,
+            score_thresh=score_th,
+            nms_thresh=nms_th,
+            row_tol=row_tol,
+            col_tol=col_tol,
+            prefer_left_alignment=prefer_left,
+            merge_row_tol=merge_row_tol,
+            merge_gap_tol=merge_gap_tol,
+            do_ocr=do_ocr,
+            ocr_lang=tess_lang,
+            manual_rows=None if auto_shape else int(manual_rows),
+            manual_cols=None if auto_shape else int(manual_cols),
         )
 
-        # 4) Asignación celdas
-        if auto_shape:
-            assign, n_rows, n_cols = assign_cells_from_groups(boxes_merged, row_groups, col_groups)
-        else:
-            assign, n_rows, n_cols = assign_cells_from_groups(
-                boxes_merged, row_groups, col_groups,
-                manual_rows=int(manual_rows), manual_cols=int(manual_cols)
-            )
+        result, dbg = pipeline.process(img_bgr, config=cfg, debug=True)
+        deskewed = result.deskewed
+        df = result.table
+        dbg_h = dbg.get("deskew", {})
+        dbg_e = dbg.get("east", {})
+        st.caption(f"Ángulo estimado: {result.angle_deg:.2f}°")
 
-        # 5) DataFrame
-        df = OCRTableBuilder.build_dataframe_from_assignments(
-            deskewed, boxes_merged, scores_east, assign, n_rows, n_cols, do_ocr=do_ocr, lang=tess_lang
-        )
+        row_groups = result.row_groups
+        col_groups = result.col_groups
+        assignments = result.assignments
+        boxes_final = [
+            (int(row.x1), int(row.y1), int(row.x2), int(row.y2))
+            for row in result.boxes_df.itertuples()
+        ]
 
         # ---------------- Visualizaciones de depuración ----------------
         cols = st.columns(3)
@@ -146,13 +158,13 @@ if uploaded_files:
             for r, grp in enumerate(row_groups):
                 color = (0, int(50 + 200 * (r / max(1, len(row_groups) - 1))), 0)
                 for idx in grp:
-                    x1, y1, x2, y2 = boxes_merged[idx]
+                    x1, y1, x2, y2 = boxes_final[idx]
                     cv2.rectangle(overlay, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(overlay, f"r{r}", (x1, max(0, y1 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
             for c, grp in enumerate(col_groups):
                 color = (int(50 + 200 * (c / max(1, len(col_groups) - 1))), 0, 0)
                 for idx in grp:
-                    x1, y1, x2, y2 = boxes_merged[idx]
+                    x1, y1, x2, y2 = boxes_final[idx]
                     cv2.putText(
                         overlay,
                         f"c{c}",
@@ -192,42 +204,38 @@ if uploaded_files:
             )
 
         # Guardar CSV de bloques detectados
-        blocks_df = pd.DataFrame(
-            [
-                {
-                    "image_name": up.name,
-                    "x1": b[0],
-                    "y1": b[1],
-                    "x2": b[2],
-                    "y2": b[3],
-                    "score": scores_east[min(i, len(scores_east) - 1)] if len(scores_east) else None,
-                    "row": assign[i][0],
-                    "col": assign[i][1],
-                }
-                for i, b in enumerate(boxes_merged)
-            ]
-        )
-        blocks_csv = blocks_df.to_csv(index=False).encode("utf-8")
+        clusters_df = result.boxes_df.copy()
+        clusters_df.insert(0, "image_name", up.name)
+        clusters_csv = clusters_df.to_csv(index=False).encode("utf-8")
         with c3:
             st.download_button(
-                "⬇️ Bloques detectados (CSV)",
-                data=blocks_csv,
-                file_name=f"{os.path.splitext(up.name)[0]}_blocks.csv",
+                "⬇️ Clusters detectados (CSV)",
+                data=clusters_csv,
+                file_name=f"{os.path.splitext(up.name)[0]}_clusters.csv",
+                mime="text/csv",
+            )
+
+        with st.expander("📦 DataFrame de clusters"):
+            st.dataframe(clusters_df, use_container_width=True)
+            st.download_button(
+                "⬇️ Descargar CSV de clusters",
+                data=clusters_csv,
+                file_name=f"{os.path.splitext(up.name)[0]}_clusters.csv",
                 mime="text/csv",
             )
 
         # Agregar a ZIP
         zf.writestr(f"{os.path.splitext(up.name)[0]}_table.csv", csv_bytes)
         zf.writestr(f"{os.path.splitext(up.name)[0]}_table.xlsx", excel_bytes)
-        zf.writestr(f"{os.path.splitext(up.name)[0]}_blocks.csv", blocks_csv)
+        zf.writestr(f"{os.path.splitext(up.name)[0]}_clusters.csv", clusters_csv)
 
         all_results.append(
             {
                 "name": up.name,
-                "angle": dbg_h.get("angle_deg", 0.0),
-                "n_boxes": len(boxes_merged),
-                "n_rows": n_rows,
-                "n_cols": n_cols,
+                "angle": result.angle_deg,
+                "n_boxes": len(boxes_final),
+                "n_rows": result.n_rows,
+                "n_cols": result.n_cols,
             }
         )
 
