@@ -18,6 +18,7 @@ from grouping import (
     merge_line_aligned_boxes,
 )
 from ocr import OCRTableBuilder
+from table_clustering import summarize_table
 
 
 @dataclass
@@ -53,6 +54,7 @@ class PipelineResult:
     table: pd.DataFrame
     n_rows: int
     n_cols: int
+    cluster_summary: Dict
 
 
 class TableExtractionPipeline:
@@ -132,6 +134,12 @@ class TableExtractionPipeline:
         boxes_df["col"] = boxes_df.index.map(lambda i: assignments.get(i, (None, None))[1])
         boxes_df["text"] = boxes_df.index.map(lambda i: texts_map.get(i, ""))
 
+        cluster_summary = summarize_table(
+            boxes_df,
+            row_tol=cfg.row_tol,
+            col_tol=cfg.col_tol,
+        )
+
         result = PipelineResult(
             deskewed=deskewed,
             angle_deg=float(dbg_h.get("angle_deg", 0.0)),
@@ -142,6 +150,7 @@ class TableExtractionPipeline:
             table=table_df,
             n_rows=n_rows,
             n_cols=n_cols,
+            cluster_summary=cluster_summary,
         )
 
         debug_payload = {
