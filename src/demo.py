@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 import sys
@@ -310,8 +311,18 @@ def _render_app() -> None:
         with pd.ExcelWriter(excel_buffer, engine="openpyxl") as writer:
             result.table.to_excel(writer, index=False, sheet_name="Sheet1")
         clusters_csv = _boxes_df_to_csv(result.boxes_df)
+        clustering_summary = result.cluster_summary
+        clustering_cells_df = pd.DataFrame(clustering_summary.get("cells", []))
+        clustering_rows_df = pd.DataFrame(clustering_summary.get("rows", []))
+        clustering_cols_df = pd.DataFrame(clustering_summary.get("columns", []))
+        clustering_csv = clustering_cells_df.to_csv(index=False).encode("utf-8")
+        clustering_json = json.dumps(
+            clustering_summary,
+            indent=2,
+            ensure_ascii=False,
+        ).encode("utf-8")
 
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         with c1:
             st.download_button(
                 "⬇️ Descargar tabla CSV",
@@ -333,6 +344,13 @@ def _render_app() -> None:
                 file_name=f"{uploaded.name}_clusters.csv",
                 mime="text/csv",
             )
+        with c4:
+            st.download_button(
+                "⬇️ table_clustering (celdas CSV)",
+                data=clustering_csv,
+                file_name=f"{uploaded.name}_table_clustering_cells.csv",
+                mime="text/csv",
+            )
 
         with st.expander("📦 DataFrame de clusters"):
             st.dataframe(result.boxes_df, use_container_width=True)
@@ -340,6 +358,38 @@ def _render_app() -> None:
                 "⬇️ Descargar CSV de clusters",
                 data=clusters_csv,
                 file_name=f"{uploaded.name}_clusters.csv",
+                mime="text/csv",
+            )
+
+        with st.expander("📐 Resumen table_clustering"):
+            st.caption("Celdas con spans y agrupaciones inferidas a partir del CSV de detección.")
+            if not clustering_cells_df.empty:
+                st.dataframe(clustering_cells_df, use_container_width=True)
+            else:
+                st.info("Sin celdas inferidas (sin detecciones de texto)")
+
+            cols = st.columns(2)
+            with cols[0]:
+                if not clustering_rows_df.empty:
+                    st.dataframe(clustering_rows_df, use_container_width=True, height=200)
+                else:
+                    st.empty()
+            with cols[1]:
+                if not clustering_cols_df.empty:
+                    st.dataframe(clustering_cols_df, use_container_width=True, height=200)
+                else:
+                    st.empty()
+
+            st.download_button(
+                "⬇️ Descargar resumen (JSON)",
+                data=clustering_json,
+                file_name=f"{uploaded.name}_table_clustering_summary.json",
+                mime="application/json",
+            )
+            st.download_button(
+                "⬇️ Descargar celdas (CSV)",
+                data=clustering_csv,
+                file_name=f"{uploaded.name}_table_clustering_cells.csv",
                 mime="text/csv",
             )
 
@@ -367,6 +417,8 @@ def _render_app() -> None:
                 excel_buffer.getvalue(),
             )
             zf.writestr(f"{stem}_clusters.csv", clusters_csv)
+            zf.writestr(f"{stem}_table_clustering_cells.csv", clustering_csv)
+            zf.writestr(f"{stem}_table_clustering_summary.json", clustering_json)
 
         zip_bytes = zip_buffer.getvalue()
 
